@@ -9,7 +9,6 @@ from io import BytesIO
 from typing import Any, List, Optional, Tuple, Union
 
 import requests
-from dateutil.tz import tzutc
 from requests.adapters import HTTPAdapter  # type: ignore[import-untyped]
 from urllib3.connection import HTTPConnection
 from urllib3.util.retry import Retry
@@ -73,7 +72,7 @@ class HTTPAdapterWithSocketOptions(HTTPAdapter):
 
 
 def _build_session(socket_options: Optional[SocketOptions] = None) -> requests.Session:
-    """Build a session for general requests (batch, decide, etc.)."""
+    """Build a session for general requests (batch, remote config, etc.)."""
     adapter = HTTPAdapterWithSocketOptions(
         max_retries=Retry(
             total=2,
@@ -132,9 +131,30 @@ def _get_flags_session() -> requests.Session:
     return _build_flags_session(_socket_options)
 
 
+def reset_sessions() -> None:
+    """
+    Reset the global sessions. This should be called after a fork to ensure
+    that the child process does not use the parent's connection pool.
+    """
+    global _session, _flags_session
+    if _session:
+        _session.close()
+    if _flags_session:
+        _flags_session.close()
+    _session = _build_session(_socket_options)
+    _flags_session = _build_flags_session(_socket_options)
+
+
 def set_socket_options(socket_options: Optional[SocketOptions]) -> None:
     """
-    Configure socket options for all HTTP connections.
+    Configure socket options for all SDK HTTP connections.
+
+    Call this during initialization, before making API requests. Pass ``None``
+    to reset to the default socket behavior.
+
+    Args:
+        socket_options: A list of ``(level, option, value)`` tuples accepted by
+            urllib3/``socket.setsockopt()``, or ``None`` to reset defaults.
 
     Example:
         from posthog import set_socket_options
@@ -149,12 +169,23 @@ def set_socket_options(socket_options: Optional[SocketOptions]) -> None:
 
 
 def enable_keep_alive() -> None:
-    """Enable TCP keepalive to prevent idle connections from being dropped."""
+    """
+    Enable TCP keepalive for SDK HTTP connections.
+
+    This helps prevent idle pooled connections from being dropped by network
+    infrastructure. Call during initialization, before making API requests.
+    """
     set_socket_options(KEEP_ALIVE_SOCKET_OPTIONS)
 
 
 def disable_connection_reuse() -> None:
-    """Disable connection reuse, creating a fresh connection for each request."""
+    """
+    Disable HTTP connection reuse for SDK requests.
+
+    Each request will create a fresh connection. This can avoid issues with
+    environments that terminate pooled connections, but adds per-request
+    overhead. Call during initialization, before making API requests.
+    """
     global _pooling_enabled
     _pooling_enabled = False
 
@@ -165,9 +196,17 @@ DEFAULT_HOST = US_INGESTION_ENDPOINT
 USER_AGENT = "posthog-python/" + VERSION
 
 
+def normalize_host(host: Optional[str]) -> str:
+    """Normalize a configured host, defaulting blank values to DEFAULT_HOST."""
+    normalized_host = (host or "").strip()
+    if not normalized_host:
+        return DEFAULT_HOST
+    return normalized_host
+
+
 def determine_server_host(host: Optional[str]) -> str:
     """Determines the server host to use."""
-    host_or_default = host or DEFAULT_HOST
+    host_or_default = normalize_host(host)
     trimmed_host = remove_trailing_slash(host_or_default)
     if trimmed_host in ("https://app.posthog.com", "https://us.posthog.com"):
         return US_INGESTION_ENDPOINT
@@ -189,8 +228,9 @@ def post(
     """Post the `kwargs` to the API"""
     log = logging.getLogger("posthog")
     body = kwargs
-    body["sentAt"] = datetime.now(tz=tzutc()).isoformat()
-    url = remove_trailing_slash(host or DEFAULT_HOST) + path
+    body["sentAt"] = datetime.now(tz=timezone.utc).isoformat()
+    trimmed_host = remove_trailing_slash(normalize_host(host))
+    url = trimmed_host + path
     body["api_key"] = api_key
     data = json.dumps(body, cls=DatetimeSerializer)
     log.debug("making request: %s to url: %s", data, url)
@@ -221,7 +261,7 @@ def _process_response(
     if res.status_code == 200:
         log.debug(success_message)
         response = res.json() if return_json else res
-        # Handle quota limited decide responses by raising a specific error
+        # Handle quota-limited feature flag responses by raising a specific error
         # NB: other services also put entries into the quotaLimited key, but right now we only care about feature flags
         # since most of the other services handle quota limiting in other places in the application.
         if (
@@ -260,18 +300,6 @@ def _process_response(
         raise APIError(res.status_code, payload["detail"], retry_after=retry_after)
     except (KeyError, ValueError):
         raise APIError(res.status_code, res.text, retry_after=retry_after)
-
-
-def decide(
-    api_key: str,
-    host: Optional[str] = None,
-    gzip: bool = False,
-    timeout: int = 15,
-    **kwargs,
-) -> Any:
-    """Post the `kwargs to the decide API endpoint"""
-    res = post(api_key, host, "/decide/?v=4", gzip, timeout, **kwargs)
-    return _process_response(res, success_message="Feature flags decided successfully")
 
 
 def flags(
@@ -342,7 +370,8 @@ def get(
     - not_modified=False and data=response if server returns 200
     """
     log = logging.getLogger("posthog")
-    full_url = remove_trailing_slash(host or DEFAULT_HOST) + url
+    trimmed_host = remove_trailing_slash(normalize_host(host))
+    full_url = trimmed_host + url
     headers = {"Authorization": "Bearer %s" % api_key, "User-Agent": USER_AGENT}
 
     if etag:

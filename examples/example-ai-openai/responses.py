@@ -1,0 +1,77 @@
+"""OpenAI Responses API with tool calling, tracked via OpenTelemetry."""
+
+import os
+import json
+import urllib.request
+from opentelemetry import trace
+from opentelemetry.sdk.trace import TracerProvider
+from opentelemetry.sdk.resources import Resource, SERVICE_NAME
+from posthog.ai.otel import PostHogSpanProcessor
+from opentelemetry.instrumentation.openai_v2 import OpenAIInstrumentor
+
+resource = Resource(
+    attributes={
+        SERVICE_NAME: "example-openai-app",
+        "posthog.distinct_id": "example-user",
+        "foo": "bar",
+        "conversation_id": "abc-123",
+    }
+)
+provider = TracerProvider(resource=resource)
+provider.add_span_processor(
+    PostHogSpanProcessor(
+        api_key=os.environ["POSTHOG_API_KEY"],
+        host=os.environ.get("POSTHOG_HOST", "https://us.i.posthog.com"),
+    )
+)
+trace.set_tracer_provider(provider)
+
+OpenAIInstrumentor().instrument()
+
+import openai  # noqa: E402
+
+client = openai.OpenAI(api_key=os.environ["OPENAI_API_KEY"])
+
+tools = [
+    {
+        "type": "function",
+        "name": "get_weather",
+        "description": "Get current weather for a location",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "latitude": {"type": "number"},
+                "longitude": {"type": "number"},
+                "location_name": {"type": "string"},
+            },
+            "required": ["latitude", "longitude", "location_name"],
+        },
+    }
+]
+
+
+def get_weather(latitude: float, longitude: float, location_name: str) -> str:
+    url = f"https://api.open-meteo.com/v1/forecast?latitude={latitude}&longitude={longitude}&current=temperature_2m,relative_humidity_2m,wind_speed_10m"
+    with urllib.request.urlopen(url) as resp:
+        data = json.loads(resp.read())
+    current = data["current"]
+    return f"Weather in {location_name}: {current['temperature_2m']}°C, humidity {current['relative_humidity_2m']}%, wind {current['wind_speed_10m']} km/h"
+
+
+response = client.responses.create(
+    model="gpt-4o-mini",
+    max_output_tokens=1024,
+    tools=tools,
+    instructions="You are a helpful assistant with access to weather data.",
+    input=[{"role": "user", "content": "What's the weather like in Tokyo?"}],
+)
+
+for output_item in response.output:
+    if hasattr(output_item, "content"):
+        for content_item in output_item.content:
+            if hasattr(content_item, "text"):
+                print(content_item.text)
+    elif hasattr(output_item, "name"):
+        args = json.loads(output_item.arguments)
+        result = get_weather(**args)
+        print(result)

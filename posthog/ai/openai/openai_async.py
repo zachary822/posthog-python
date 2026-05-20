@@ -40,10 +40,10 @@ class AsyncOpenAI(openai.AsyncOpenAI):
     def __init__(self, posthog_client: Optional[PostHogClient] = None, **kwargs):
         """
         Args:
-            api_key: OpenAI API key.
-            posthog_client: If provided, events will be captured via this client instead
-                            of the global posthog.
-            **openai_config: Any additional keyword args to set on openai (e.g. organization="xxx").
+            posthog_client: If provided, events will be captured via this client
+                instead of the global ``posthog`` client.
+            **kwargs: Arguments passed to ``openai.AsyncOpenAI`` such as
+                ``api_key`` or ``organization``.
         """
 
         super().__init__(**kwargs)
@@ -90,6 +90,20 @@ class WrappedResponses:
         posthog_groups: Optional[Dict[str, Any]] = None,
         **kwargs: Any,
     ):
+        """
+        Create an OpenAI Responses API response while tracking usage in PostHog.
+
+        Args:
+            posthog_distinct_id: Optional distinct ID to associate with the usage event.
+            posthog_trace_id: Optional trace ID. Generated automatically when omitted.
+            posthog_properties: Additional properties to include with the usage event.
+            posthog_privacy_mode: Whether to redact captured input and output.
+            posthog_groups: Optional PostHog groups to associate with the event.
+            **kwargs: Arguments passed to OpenAI's async ``responses.create`` API.
+
+        Returns:
+            The OpenAI response, or an async streaming iterator when ``stream=True``.
+        """
         if posthog_trace_id is None:
             posthog_trace_id = str(uuid.uuid4())
 
@@ -129,12 +143,14 @@ class WrappedResponses:
         usage_stats: TokenUsage = TokenUsage()
         final_content = []
         model_from_response: Optional[str] = None
+        stop_reason: Optional[str] = None
         response = await self._original.create(**kwargs)
 
         async def async_generator():
             nonlocal usage_stats
             nonlocal final_content  # noqa: F824
             nonlocal model_from_response
+            nonlocal stop_reason
 
             try:
                 async for chunk in response:
@@ -157,6 +173,17 @@ class WrappedResponses:
                     if content is not None:
                         final_content.append(content)
 
+                    # Capture stop reason from response.completed event
+                    if (
+                        hasattr(chunk, "type")
+                        and chunk.type == "response.completed"
+                        and hasattr(chunk, "response")
+                        and chunk.response
+                    ):
+                        chunk_status = getattr(chunk.response, "status", None)
+                        if chunk_status is not None:
+                            stop_reason = chunk_status
+
                     yield chunk
 
             finally:
@@ -176,6 +203,7 @@ class WrappedResponses:
                     output,
                     extract_available_tool_calls("openai", kwargs),
                     model_from_response,
+                    stop_reason=stop_reason,
                 )
 
         return async_generator()
@@ -193,6 +221,7 @@ class WrappedResponses:
         output: Any,
         available_tool_calls: Optional[List[Dict[str, Any]]] = None,
         model_from_response: Optional[str] = None,
+        stop_reason: Optional[str] = None,
     ):
         if posthog_trace_id is None:
             posthog_trace_id = str(uuid.uuid4())
@@ -235,6 +264,9 @@ class WrappedResponses:
             and web_search_count > 0
         ):
             event_properties["$ai_web_search_count"] = web_search_count
+
+        if stop_reason is not None:
+            event_properties["$ai_stop_reason"] = stop_reason
 
         if available_tool_calls:
             event_properties["$ai_tools"] = available_tool_calls
@@ -300,6 +332,7 @@ class WrappedChat:
 
     @property
     def completions(self):
+        """Access async chat completions with PostHog usage tracking."""
         return WrappedCompletions(self._client, self._original.completions)
 
 
@@ -323,6 +356,20 @@ class WrappedCompletions:
         posthog_groups: Optional[Dict[str, Any]] = None,
         **kwargs: Any,
     ):
+        """
+        Create an OpenAI chat completion while tracking usage in PostHog.
+
+        Args:
+            posthog_distinct_id: Optional distinct ID to associate with the usage event.
+            posthog_trace_id: Optional trace ID. Generated automatically when omitted.
+            posthog_properties: Additional properties to include with the usage event.
+            posthog_privacy_mode: Whether to redact captured input and output.
+            posthog_groups: Optional PostHog groups to associate with the event.
+            **kwargs: Arguments passed to OpenAI's async ``chat.completions.create`` API.
+
+        Returns:
+            The OpenAI chat completion, or an async streaming iterator when ``stream=True``.
+        """
         if posthog_trace_id is None:
             posthog_trace_id = str(uuid.uuid4())
 
@@ -365,6 +412,7 @@ class WrappedCompletions:
         accumulated_content = []
         accumulated_tool_calls: Dict[int, Dict[str, Any]] = {}
         model_from_response: Optional[str] = None
+        stop_reason: Optional[str] = None
 
         if "stream_options" not in kwargs:
             kwargs["stream_options"] = {}
@@ -376,6 +424,7 @@ class WrappedCompletions:
             nonlocal accumulated_content  # noqa: F824
             nonlocal accumulated_tool_calls
             nonlocal model_from_response
+            nonlocal stop_reason
 
             try:
                 async for chunk in response:
@@ -399,6 +448,14 @@ class WrappedCompletions:
                         accumulate_openai_tool_calls(
                             accumulated_tool_calls, chunk_tool_calls
                         )
+
+                    # Capture stop reason from chunk
+                    if (
+                        hasattr(chunk, "choices")
+                        and chunk.choices
+                        and getattr(chunk.choices[0], "finish_reason", None) is not None
+                    ):
+                        stop_reason = chunk.choices[0].finish_reason
 
                     yield chunk
 
@@ -426,6 +483,7 @@ class WrappedCompletions:
                     tool_calls_list,
                     extract_available_tool_calls("openai", kwargs),
                     model_from_response,
+                    stop_reason=stop_reason,
                 )
 
         return async_generator()
@@ -444,6 +502,7 @@ class WrappedCompletions:
         tool_calls: Optional[List[Dict[str, Any]]] = None,
         available_tool_calls: Optional[List[Dict[str, Any]]] = None,
         model_from_response: Optional[str] = None,
+        stop_reason: Optional[str] = None,
     ):
         if posthog_trace_id is None:
             posthog_trace_id = str(uuid.uuid4())
@@ -487,6 +546,9 @@ class WrappedCompletions:
             and web_search_count > 0
         ):
             event_properties["$ai_web_search_count"] = web_search_count
+
+        if stop_reason is not None:
+            event_properties["$ai_stop_reason"] = stop_reason
 
         if available_tool_calls:
             event_properties["$ai_tools"] = available_tool_calls
@@ -603,6 +665,7 @@ class WrappedBeta:
 
     @property
     def chat(self):
+        """Access async beta chat APIs with PostHog usage tracking."""
         return WrappedBetaChat(self._client, self._original.chat)
 
 
@@ -620,6 +683,7 @@ class WrappedBetaChat:
 
     @property
     def completions(self):
+        """Access async beta chat completions with PostHog usage tracking."""
         return WrappedBetaCompletions(self._client, self._original.completions)
 
 
@@ -644,6 +708,20 @@ class WrappedBetaCompletions:
         posthog_groups: Optional[Dict[str, Any]] = None,
         **kwargs: Any,
     ):
+        """
+        Parse an OpenAI beta chat completion while tracking usage in PostHog.
+
+        Args:
+            posthog_distinct_id: Optional distinct ID to associate with the usage event.
+            posthog_trace_id: Optional trace ID. Generated automatically when omitted.
+            posthog_properties: Additional properties to include with the usage event.
+            posthog_privacy_mode: Whether to redact captured input and output.
+            posthog_groups: Optional PostHog groups to associate with the event.
+            **kwargs: Arguments passed to OpenAI's async beta ``chat.completions.parse`` API.
+
+        Returns:
+            The parsed response from OpenAI.
+        """
         return await call_llm_and_track_usage_async(
             posthog_distinct_id,
             self._client._ph_client,

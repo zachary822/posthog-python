@@ -104,6 +104,20 @@ class AsyncWrappedMessages(AsyncMessages):
         posthog_groups: Optional[Dict[str, Any]] = None,
         **kwargs: Any,
     ):
+        """
+        Stream an Anthropic message asynchronously while tracking usage in PostHog.
+
+        Args:
+            posthog_distinct_id: Optional distinct ID to associate with the usage event.
+            posthog_trace_id: Optional trace ID. Generated automatically when omitted.
+            posthog_properties: Additional properties to include with the usage event.
+            posthog_privacy_mode: Whether to redact captured input and output.
+            posthog_groups: Optional PostHog groups to associate with the event.
+            **kwargs: Arguments passed to Anthropic's async ``messages.create`` API.
+
+        Returns:
+            An async streaming iterator yielding Anthropic events.
+        """
         if posthog_trace_id is None:
             posthog_trace_id = str(uuid.uuid4())
 
@@ -131,6 +145,7 @@ class AsyncWrappedMessages(AsyncMessages):
         content_blocks: List[StreamingContentBlock] = []
         tools_in_progress: Dict[str, ToolInProgress] = {}
         current_text_block: Optional[StreamingContentBlock] = None
+        stop_reason: Optional[str] = None
         response = await super().create(**kwargs)
 
         async def generator():
@@ -139,6 +154,7 @@ class AsyncWrappedMessages(AsyncMessages):
             nonlocal content_blocks
             nonlocal tools_in_progress
             nonlocal current_text_block
+            nonlocal stop_reason
 
             try:
                 async for event in response:
@@ -181,6 +197,14 @@ class AsyncWrappedMessages(AsyncMessages):
                             event, content_blocks, tools_in_progress
                         )
 
+                    # Capture stop reason from message_delta events
+                    if hasattr(event, "type") and event.type == "message_delta":
+                        delta = getattr(event, "delta", None)
+                        if delta is not None:
+                            delta_stop_reason = getattr(delta, "stop_reason", None)
+                            if delta_stop_reason is not None:
+                                stop_reason = delta_stop_reason
+
                     yield event
 
             finally:
@@ -198,6 +222,7 @@ class AsyncWrappedMessages(AsyncMessages):
                     latency,
                     content_blocks,
                     accumulated_content,
+                    stop_reason=stop_reason,
                 )
 
         return generator()
@@ -214,6 +239,7 @@ class AsyncWrappedMessages(AsyncMessages):
         latency: float,
         content_blocks: List[StreamingContentBlock],
         accumulated_content: str,
+        stop_reason: Optional[str] = None,
     ):
         from posthog.ai.types import StreamingEventData
         from posthog.ai.anthropic.anthropic_converter import (
@@ -242,6 +268,7 @@ class AsyncWrappedMessages(AsyncMessages):
             properties=posthog_properties,
             privacy_mode=posthog_privacy_mode,
             groups=posthog_groups,
+            stop_reason=stop_reason,
         )
 
         # Use the common capture function

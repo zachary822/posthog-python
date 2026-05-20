@@ -1,5 +1,123 @@
 # posthog
 
+## 7.15.0 — 2026-05-19
+
+### Minor changes
+
+- [52cd20e](https://github.com/posthog/posthog-python/commit/52cd20e1237c6dd7be7364b744bd16565794c8ab) feat: add Celery integration and improve PostHog client fork safety — Thanks @parinporecha!
+
+## 7.14.2 — 2026-05-13
+
+### Patch changes
+
+- [44c1261](https://github.com/posthog/posthog-python/commit/44c1261ce17f07ce4ce430d1b188501a5a1e2f45) Fix scoped context support for async functions — Thanks @marandaneto!
+
+## 7.14.1 — 2026-05-11
+
+### Patch changes
+
+- [f6c8ede](https://github.com/posthog/posthog-python/commit/f6c8ede23505e3e97ba14aebb8efd4f237cb1dca) fix: type warning on new_context — Thanks @itsaphel for your first contribution 🎉!
+
+## 7.14.0 — 2026-05-01
+
+### Minor changes
+
+- [69dc2a8](https://github.com/posthog/posthog-python/commit/69dc2a871a8f93fe6bcd14269f5b17c5b48fc897) Add `evaluate_flags()` and a new `flags` option on `capture()` so a single `/flags` call can power both flag branching and event enrichment per request:
+  
+  ```python
+  flags = posthog.evaluate_flags(distinct_id, person_properties={"plan": "enterprise"})
+  if flags.is_enabled("new-dashboard"):
+      render_new_dashboard()
+  posthog.capture("page_viewed", distinct_id=distinct_id, flags=flags)
+  ```
+  
+  The returned `FeatureFlagEvaluations` snapshot exposes `is_enabled()`, `get_flag()`, `get_flag_payload()` for branching and `only_accessed()` / `only([keys])` filter helpers. Pass `flag_keys=[...]` to `evaluate_flags()` to scope the underlying `/flags` request itself.
+  
+  Deprecates `feature_enabled()`, `get_feature_flag()`, `get_feature_flag_payload()`, and `capture(send_feature_flags=...)`. They continue to work but now emit a `DeprecationWarning` pointing at `evaluate_flags()`. Removal is planned for the next major version. — Thanks @dmarticus!
+
+## 7.13.2 — 2026-04-30
+
+### Patch changes
+
+- [f4af88a](https://github.com/posthog/posthog-python/commit/f4af88a3c3e5a095366af8789aa6c649eaeb4fd9) Prevent flush from hanging after dropping oversized queued events. — Thanks @marandaneto!
+- [6b3d1c7](https://github.com/posthog/posthog-python/commit/6b3d1c75780d10eb8aec2efede9d0d1de0adc889) Sanitize PostHog tracing headers extracted by Django middleware. — Thanks @dustinbyrne!
+- [dea848f](https://github.com/posthog/posthog-python/commit/dea848fd60a8857d8087c8b5058b0a8d7965981d) Remove python-dateutil as a runtime dependency — Thanks @marandaneto!
+- [a1c6640](https://github.com/posthog/posthog-python/commit/a1c6640d42924a006a3495033b55e4be5ed5ede7) Improve local feature flag authentication error messages. — Thanks @marandaneto!
+- [8bdd3fa](https://github.com/posthog/posthog-python/commit/8bdd3fa126b29a366efbcf66060cb54e09010c05) Treat clients with an empty project API key as disabled no-ops. — Thanks @marandaneto!
+
+## 7.13.1 — 2026-04-24
+
+### Patch changes
+
+- [0d36184](https://github.com/posthog/posthog-python/commit/0d361845acc18f660b6ca1f7a3a0ae1168339d2e) Support mixed user+group targeting in local flag evaluation. — Thanks @patricio-posthog!
+
+## 7.13.0 — 2026-04-21
+
+### Minor changes
+
+- [12c38e7](https://github.com/posthog/posthog-python/commit/12c38e7a788c29a244b715c4f9965b1ac0bb4b3f) Add `capture_errors` option to `Prompts` that reports prompt fetch failures to PostHog error tracking via `capture_exception()` when enabled. — Thanks @andrewm4894!
+
+### Patch changes
+
+- [1b098e7](https://github.com/posthog/posthog-python/commit/1b098e7dc1b25b41ee35a2eef7469e71fe42b1fc) Trim surrounding whitespace from API keys and host config before using them. — Thanks @marandaneto!
+
+## 7.12.0 — 2026-04-16
+
+### Minor changes
+
+- [220d9e8](https://github.com/posthog/posthog-python/commit/220d9e88877dee7eabd34fed68c2a4a65e6526a7) `Prompts.get()` now accepts `with_metadata=True` and returns a `PromptResult` dataclass containing `source` (`api`, `cache`, `stale_cache`, or `code_fallback`), `name`, and `version` alongside the prompt text. The previous plain-string return is deprecated and will be removed in a future major version. — Thanks @marandaneto!
+
+## 7.11.2 — 2026-04-15
+
+### Patch changes
+
+- [f5a95b4](https://github.com/posthog/posthog-python/commit/f5a95b454ae7fd8bf46381b1c624df827903260d) feat(flags): switch local evaluation polling from `/api/feature_flag/local_evaluation` to `/flags/definitions` — Thanks @patricio-posthog!
+
+## 7.11.1 — 2026-04-14
+
+### Patch changes
+
+- [c3f097f](https://github.com/posthog/posthog-python/commit/c3f097f72f5ef6c1ecd25ade7d3ba08e57765eaf) feat: Add os_distro information to events — Thanks @parinporecha!
+
+## 7.11.0 — 2026-04-10
+
+### Minor changes
+
+- [b921fe3](https://github.com/posthog/posthog-python/commit/b921fe33a9115fbf5f5171b80e1deabffd3e66ca) Add Gemini `embed_content` tracking support for both sync and async clients — Thanks @carlos-marchal-ph!
+- [44b92a8](https://github.com/posthog/posthog-python/commit/44b92a844a2d8170e5b2247e509279f4654c4ef6) feat(ai): add $ai_stop_reason extraction for all providers — Thanks @carlos-marchal-ph!
+
+### Patch changes
+
+- [7c5cad8](https://github.com/posthog/posthog-python/commit/7c5cad8fcf818c9b8b4f074876718b937f2f8072) fix: graceful fallback in claude_agent_sdk query wrapper when PostHog is not configured — Thanks @andrewm4894!
+
+## 7.10.3 — 2026-04-08
+
+### Patch changes
+
+- [e22e893](https://github.com/posthog/posthog-python/commit/e22e893b236bf6af1cb8f6c18712727d24fe5c7e) fix: pass the module-level `posthog.before_send` callback into the lazily initialized default client — Thanks @marandaneto!
+
+## 7.10.2 — 2026-04-08
+
+### Patch changes
+
+- [bae355c](https://github.com/posthog/posthog-python/commit/bae355cd787f4c1a119fd2b396ba444b1a218b6a) feat(flags): make local evaluation endpoint configurable via `POSTHOG_LOCAL_EVALUATION_ENDPOINT` env var with fallback to default endpoint — Thanks @patricio-posthog for your first contribution 🎉!
+
+## 7.10.1 — 2026-04-08
+
+### Patch changes
+
+- [a5052b0](https://github.com/posthog/posthog-python/commit/a5052b089b106af5a2fa5236fcf1f4f84943f899) fix: Django middleware accidentally passed capture_exceptions as positional arg, setting fresh=True and resetting context state — Thanks @marandaneto!
+
+## 7.10.0 — 2026-04-07
+
+### Minor changes
+
+- [d234b53](https://github.com/posthog/posthog-python/commit/d234b53ff9578648d3bdb70d54cde98cdb7d9c87) feat(ai): add Claude Agent SDK integration for LLM analytics — Thanks @andrewm4894!
+
+### Patch changes
+
+- [754c45f](https://github.com/posthog/posthog-python/commit/754c45fa024be3fdb1f1d1f312a94070786652b7) fix: propagate missing params in module-level wrapper functions (`distinct_id` for `group_identify`, `flag_keys_to_evaluate` for `get_all_flags`/`get_all_flags_and_payloads`) — Thanks @dustinbyrne!
+
 ## 7.9.12 — 2026-03-12
 
 ### Patch changes

@@ -3,8 +3,7 @@ import unittest
 from datetime import datetime
 from uuid import uuid4
 
-import mock
-import six
+from unittest import mock
 from parameterized import parameterized
 
 from posthog.client import Client
@@ -41,6 +40,71 @@ class TestClient(unittest.TestCase):
 
     def test_requires_api_key(self):
         self.assertRaises(TypeError, Client)
+
+    @parameterized.expand(
+        [
+            ("valid_key", " \nphc_validkey\t ", "phc_validkey", False, False),
+            ("whitespace_only", " \n\t ", "", True, True),
+            ("empty_string", "", "", True, True),
+        ]
+    )
+    def test_trims_api_key_whitespace(
+        self, _, raw_api_key, expected_api_key, expected_disabled, expect_error_log
+    ):
+        with mock.patch.object(Client.log, "error") as mock_error:
+            client = Client(raw_api_key, send=False)
+
+        self.assertEqual(client.api_key, expected_api_key)
+        self.assertEqual(client.disabled, expected_disabled)
+        if expect_error_log:
+            mock_error.assert_called_once_with(
+                "api_key is empty after trimming whitespace; check your project API key"
+            )
+        else:
+            mock_error.assert_not_called()
+
+    def test_trims_host_and_personal_api_key_whitespace(self):
+        client = Client(
+            FAKE_TEST_API_KEY,
+            host=" \nhttps://eu.posthog.com/\t ",
+            personal_api_key=" \n\t ",
+            send=False,
+        )
+
+        self.assertEqual(client.raw_host, "https://eu.posthog.com/")
+        self.assertEqual(client.host, "https://eu.i.posthog.com")
+        self.assertIsNone(client.personal_api_key)
+
+    def test_client_with_empty_api_key_is_noop(self):
+        client = Client("", send=False)
+
+        self.assertIsNone(client.capture("event", distinct_id="distinct_id"))
+
+    @mock.patch("posthog.client.get")
+    def test_disabled_client_does_not_load_feature_flags(self, patch_get):
+        client = Client("", personal_api_key="test", send=False)
+
+        client.load_feature_flags()
+
+        patch_get.assert_not_called()
+        self.assertEqual(client.feature_flags, [])
+        self.assertIsNone(client.poller)
+
+    @mock.patch("posthog.client.flags")
+    def test_disabled_client_does_not_get_flags_decision(self, patch_flags):
+        client = Client("", send=False)
+
+        self.assertEqual(client.get_flags_decision("distinct_id")["flags"], {})
+        self.assertEqual(client.get_feature_variants("distinct_id"), {})
+        self.assertEqual(client.get_feature_payloads("distinct_id"), {})
+        self.assertEqual(
+            client.get_feature_flags_and_payloads("distinct_id"),
+            {"featureFlags": {}, "featureFlagPayloads": {}},
+        )
+        self.assertIsNone(
+            client.capture("event", distinct_id="distinct_id", send_feature_flags=True)
+        )
+        patch_flags.assert_not_called()
 
     def test_empty_flush(self):
         self.client.flush()
@@ -491,7 +555,9 @@ class TestClient(unittest.TestCase):
             self.assertEqual(client.feature_flags_by_key, {})
             self.assertEqual(client.group_type_mapping, {})
             self.assertEqual(client.cohorts, {})
-            self.assertIn("please set a valid personal_api_key", logs.output[0])
+            self.assertIn("Unauthorized", logs.output[0])
+            self.assertIn("project_api_key", logs.output[0])
+            self.assertIn("personal_api_key", logs.output[0])
 
     @mock.patch("posthog.client.flags")
     def test_dont_override_capture_with_local_flags(self, patch_flags):
@@ -1728,7 +1794,7 @@ class TestClient(unittest.TestCase):
         self.assertIsNone(msg_uuid)
 
     def test_unicode(self):
-        Client(six.u("unicode_key"))
+        Client("unicode_key")
 
     def test_numeric_distinct_id(self):
         self.client.capture("python event", distinct_id=1234)
@@ -2164,7 +2230,7 @@ class TestClient(unittest.TestCase):
 
     @parameterized.expand(
         [
-            # name, sys_platform, version_info, expected_runtime, expected_version, expected_os, expected_os_version, platform_method, platform_return, distro_info
+            # name, sys_platform, version_info, expected_runtime, expected_version, expected_os, expected_os_version, expected_os_distro, platform_method, platform_return
             (
                 "macOS",
                 "darwin",
@@ -2173,9 +2239,9 @@ class TestClient(unittest.TestCase):
                 "3.8.10",
                 "Mac OS X",
                 "10.15.7",
+                None,
                 "mac_ver",
                 ("10.15.7", "", ""),
-                None,
             ),
             (
                 "Windows",
@@ -2185,9 +2251,9 @@ class TestClient(unittest.TestCase):
                 "3.8.10",
                 "Windows",
                 "10",
+                None,
                 "win32_ver",
                 ("10", "", "", ""),
-                None,
             ),
             (
                 "Linux",
@@ -2197,9 +2263,9 @@ class TestClient(unittest.TestCase):
                 "3.8.10",
                 "Linux",
                 "20.04",
+                "Ubuntu",
                 None,
                 None,
-                {"version": "20.04"},
             ),
         ]
     )
@@ -2212,9 +2278,9 @@ class TestClient(unittest.TestCase):
         expected_version,
         expected_os,
         expected_os_version,
+        expected_os_distro,
         platform_method,
         platform_return,
-        distro_info,
     ):
         """Test that we can mock platform and sys for testing system_context"""
         with mock.patch("posthog.utils.platform") as mock_platform:
@@ -2232,11 +2298,10 @@ class TestClient(unittest.TestCase):
 
                 # Special handling for Linux which uses distro module
                 if sys_platform == "linux":
-                    # Directly patch the get_os_info function to return our expected values
-                    with mock.patch(
-                        "posthog.utils.get_os_info",
-                        return_value=(expected_os, expected_os_version),
-                    ):
+                    with mock.patch("posthog.utils.distro") as mock_distro:
+                        mock_distro.info.return_value = {"version": expected_os_version}
+                        mock_distro.name.return_value = expected_os_distro or ""
+
                         from posthog.utils import system_context
 
                         context = system_context()
@@ -2253,6 +2318,9 @@ class TestClient(unittest.TestCase):
                     "$os": expected_os,
                     "$os_version": expected_os_version,
                 }
+
+                if sys_platform == "linux":
+                    expected_context["$os_distro"] = expected_os_distro
 
                 assert context == expected_context
 

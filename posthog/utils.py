@@ -13,9 +13,6 @@ import sys
 import platform
 import distro  # For Linux OS detection
 
-import six
-from dateutil.tz import tzlocal, tzutc
-
 log = logging.getLogger("posthog")
 
 
@@ -37,12 +34,12 @@ def guess_timezone(dt):
         # case, and then defaults to utc
         delta = datetime.now() - dt
         if total_seconds(delta) < 5:
-            # this was created using datetime.datetime.now()
-            # so we are in the local timezone
-            return dt.replace(tzinfo=tzlocal())
+            # this was created using datetime.datetime.now(),
+            # so use the current system local timezone
+            return dt.replace(tzinfo=datetime.now().astimezone().tzinfo)
         else:
             # at this point, the best we can do is guess UTC
-            return dt.replace(tzinfo=tzutc())
+            return dt.replace(tzinfo=timezone.utc)
 
     return dt
 
@@ -58,9 +55,7 @@ def clean(item):
         return float(item)
     if isinstance(item, UUID):
         return str(item)
-    if isinstance(
-        item, (six.string_types, bool, numbers.Number, datetime, date, type(None))
-    ):
+    if isinstance(item, (str, bool, numbers.Number, datetime, date, type(None))):
         return item
     if isinstance(item, (set, list, tuple)):
         return _clean_list(item)
@@ -88,7 +83,7 @@ def _clean_list(list_):
 
 def _clean_dict(dict_):
     data = {}
-    for k, v in six.iteritems(dict_):
+    for k, v in dict_.items():
         try:
             data[k] = clean(v)
         except TypeError:
@@ -467,11 +462,12 @@ def str_iequals(value, comparand):
 
 def get_os_info():
     """
-    Returns standardized OS name and version information.
+    Returns standardized OS name, version and distro (in case of Linux) information.
     Similar to how user agent parsing works in JS.
     """
     os_name = ""
     os_version = ""
+    os_distro = ""
 
     platform_name = sys.platform
 
@@ -494,6 +490,9 @@ def get_os_info():
         linux_info = distro.info()
         if linux_info["version"]:
             os_version = linux_info["version"]
+        linux_distro = distro.name()
+        if linux_distro:
+            os_distro = linux_distro
 
     elif platform_name.startswith("freebsd"):
         os_name = "FreeBSD"
@@ -505,15 +504,19 @@ def get_os_info():
         if hasattr(platform, "release"):
             os_version = platform.release()
 
-    return os_name, os_version
+    info = {
+        "$os": os_name,
+        "$os_version": os_version,
+    }
+    if os_distro:
+        info["$os_distro"] = os_distro
+
+    return info
 
 
 def system_context() -> dict[str, Any]:
-    os_name, os_version = get_os_info()
-
     return {
         "$python_runtime": platform.python_implementation(),
         "$python_version": "%s.%s.%s" % (sys.version_info[:3]),
-        "$os": os_name,
-        "$os_version": os_version,
+        **get_os_info(),
     }

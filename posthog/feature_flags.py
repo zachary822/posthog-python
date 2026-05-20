@@ -1,12 +1,10 @@
+import calendar
 import datetime
 import hashlib
 import logging
 import re
 import warnings
 from typing import Optional
-
-from dateutil import parser
-from dateutil.relativedelta import relativedelta
 
 from posthog import utils
 from posthog.types import FlagValue
@@ -293,6 +291,9 @@ def match_feature_flag_properties(
     evaluation_cache=None,
     device_id=None,
     bucketing_value=None,
+    group_type_mapping=None,
+    groups=None,
+    group_properties=None,
 ) -> FlagValue:
     if bucketing_value is None:
         warnings.warn(
@@ -305,32 +306,65 @@ def match_feature_flag_properties(
 
     flag_filters = flag.get("filters") or {}
     flag_conditions = flag_filters.get("groups") or []
+    flag_aggregation = flag_filters.get("aggregation_group_type_index")
     is_inconclusive = False
     cohort_properties = cohort_properties or {}
+    groups = groups or {}
+    group_properties = group_properties or {}
+    group_type_mapping = group_type_mapping or {}
     # Some filters can be explicitly set to null, which require accessing variants like so
     flag_variants = (flag_filters.get("multivariate") or {}).get("variants") or []
     valid_variant_keys = [variant["key"] for variant in flag_variants]
 
     for condition in flag_conditions:
         try:
-            # if any one condition resolves to True, we can shortcircuit and return
-            # the matching variant
+            # Per-condition aggregation overrides only when the condition explicitly
+            # sets its own aggregation_group_type_index (mixed targeting).
+            # When absent, use the properties/bucketing already resolved by the caller.
+            condition_aggregation = condition.get(
+                "aggregation_group_type_index", flag_aggregation
+            )
+
+            # Mixed-override path: condition-level aggregation differs from flag-level.
+            # This assumes flag-level aggregation is None for mixed flags.
+            if condition_aggregation != flag_aggregation:
+                if condition_aggregation is not None:
+                    group_name = group_type_mapping.get(str(condition_aggregation))
+                    if not group_name or group_name not in groups:
+                        log.debug(
+                            "Skipping group condition for flag '%s': group type index %s not available",
+                            flag.get("key", ""),
+                            condition_aggregation,
+                        )
+                        continue
+                    if group_name not in group_properties:
+                        is_inconclusive = True
+                        continue
+                    effective_properties = group_properties[group_name]
+                    effective_bucketing = groups[group_name]
+                else:
+                    effective_properties = properties
+                    effective_bucketing = bucketing_value
+            else:
+                effective_properties = properties
+                effective_bucketing = bucketing_value
+
             if is_condition_match(
                 flag,
                 distinct_id,
                 condition,
-                properties,
+                effective_properties,
                 cohort_properties,
                 flags_by_key,
                 evaluation_cache,
-                bucketing_value=bucketing_value,
+                bucketing_value=effective_bucketing,
                 device_id=device_id,
             ):
                 variant_override = condition.get("variant")
                 if variant_override and variant_override in valid_variant_keys:
                     variant = variant_override
                 else:
-                    variant = get_matching_variant(flag, bucketing_value)
+                    variant = get_matching_variant(flag, effective_bucketing)
                 return variant or True
         except RequiresServerEvaluation:
             # Static cohort or other missing server-side data - must fallback to API
@@ -494,7 +528,7 @@ def match_property(property, property_values) -> bool:
             parsed_date = relative_date_parse_for_feature_flag_matching(str(value))
 
             if not parsed_date:
-                parsed_date = parser.parse(str(value))
+                parsed_date = parse_datetime(str(value))
                 parsed_date = convert_to_datetime_aware(parsed_date)
         except Exception as e:
             raise InconclusiveMatchError(
@@ -519,7 +553,7 @@ def match_property(property, property_values) -> bool:
                 return override_value > parsed_date.date()
         elif isinstance(override_value, str):
             try:
-                override_date = parser.parse(override_value)
+                override_date = parse_datetime(override_value)
                 override_date = convert_to_datetime_aware(override_date)
                 if operator == "is_date_before":
                     return override_date < parsed_date
@@ -740,6 +774,40 @@ def match_property_group(
         return property_group_type == "AND"
 
 
+def parse_datetime(value: str) -> datetime.datetime:
+    text = value.strip()
+    if text.endswith("Z"):
+        text = text[:-1] + "+00:00"
+    elif text.upper().endswith(" UTC"):
+        text = text[:-4] + "+00:00"
+    elif re.fullmatch(r"\d{4}", text):
+        now = datetime.datetime.now()
+        return datetime.datetime(int(text), now.month, now.day)
+
+    text = re.sub(r" ([+-]\d{2}:\d{2})$", r"\1", text)
+    return datetime.datetime.fromisoformat(text)
+
+
+# Python's stdlib doesn't provide a calendar-aware month/year delta.
+# Clamp the day to the target month's end to match dateutil.relativedelta behavior.
+def _subtract_months(dt: datetime.datetime, months: int) -> Optional[datetime.datetime]:
+    month_index = dt.year * 12 + dt.month - 1 - months
+    year = month_index // 12
+    month = month_index % 12 + 1
+    if not 1 <= year <= 9999:
+        return None
+    day = min(dt.day, calendar.monthrange(year, month)[1])
+    return dt.replace(year=year, month=month, day=day)
+
+
+def _subtract_years(dt: datetime.datetime, years: int) -> Optional[datetime.datetime]:
+    year = dt.year - years
+    if not 1 <= year <= 9999:
+        return None
+    day = min(dt.day, calendar.monthrange(year, dt.month)[1])
+    return dt.replace(year=year, day=day)
+
+
 def relative_date_parse_for_feature_flag_matching(
     value: str,
 ) -> Optional[datetime.datetime]:
@@ -755,15 +823,15 @@ def relative_date_parse_for_feature_flag_matching(
 
         interval = match.group("interval")
         if interval == "h":
-            parsed_dt = parsed_dt - relativedelta(hours=number)
+            parsed_dt = parsed_dt - datetime.timedelta(hours=number)
         elif interval == "d":
-            parsed_dt = parsed_dt - relativedelta(days=number)
+            parsed_dt = parsed_dt - datetime.timedelta(days=number)
         elif interval == "w":
-            parsed_dt = parsed_dt - relativedelta(weeks=number)
+            parsed_dt = parsed_dt - datetime.timedelta(weeks=number)
         elif interval == "m":
-            parsed_dt = parsed_dt - relativedelta(months=number)
+            return _subtract_months(parsed_dt, number)
         elif interval == "y":
-            parsed_dt = parsed_dt - relativedelta(years=number)
+            return _subtract_years(parsed_dt, number)
         else:
             return None
 

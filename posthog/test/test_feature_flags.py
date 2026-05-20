@@ -1,14 +1,18 @@
 import datetime
 import unittest
 
-import mock
-from dateutil import parser, tz
+from unittest import mock
+from zoneinfo import ZoneInfo
+from dateutil import parser
+from dateutil.relativedelta import relativedelta
 from freezegun import freeze_time
+from parameterized import parameterized
 
 from posthog.client import Client
 from posthog.feature_flags import (
     InconclusiveMatchError,
     match_property,
+    parse_datetime,
     relative_date_parse_for_feature_flag_matching,
 )
 from posthog.request import APIError, GetResponse
@@ -217,7 +221,7 @@ class TestLocalEvaluation(unittest.TestCase):
 
         # Now group type mappings are gone, so fall back to /flags/
         patch_flags.return_value = {
-            "featureFlags": {"group-flag": "decide-fallback-value"}
+            "featureFlags": {"group-flag": "flags-fallback-value"}
         }
 
         self.client.group_type_mapping = {}
@@ -228,7 +232,7 @@ class TestLocalEvaluation(unittest.TestCase):
                 groups={"company": "amazon"},
                 group_properties={"company": {"name": "Project Name 1"}},
             ),
-            "decide-fallback-value",
+            "flags-fallback-value",
         )
 
         self.assertEqual(patch_flags.call_count, 1)
@@ -258,7 +262,7 @@ class TestLocalEvaluation(unittest.TestCase):
     @mock.patch("posthog.client.get")
     def test_flag_with_complex_definition(self, patch_get, patch_flags):
         patch_flags.return_value = {
-            "featureFlags": {"complex-flag": "decide-fallback-value"}
+            "featureFlags": {"complex-flag": "flags-fallback-value"}
         }
         client = Client(FAKE_TEST_API_KEY, personal_api_key=FAKE_TEST_API_KEY)
         client.feature_flags = [
@@ -339,7 +343,7 @@ class TestLocalEvaluation(unittest.TestCase):
                 "some-distinct-id_outside_rollout?",
                 person_properties={"region": "USA", "email": "a@b.com"},
             ),
-            "decide-fallback-value",
+            "flags-fallback-value",
         )
         self.assertEqual(patch_flags.call_count, 1)
 
@@ -352,7 +356,7 @@ class TestLocalEvaluation(unittest.TestCase):
                 "some-distinct-id",
                 person_properties={"doesnt_matter": "1"},
             ),
-            "decide-fallback-value",
+            "flags-fallback-value",
         )
         self.assertEqual(patch_flags.call_count, 1)
 
@@ -363,7 +367,7 @@ class TestLocalEvaluation(unittest.TestCase):
             client.get_feature_flag(
                 "complex-flag", "some-distinct-id", person_properties={"region": "USA"}
             ),
-            "decide-fallback-value",
+            "flags-fallback-value",
         )
         self.assertEqual(patch_flags.call_count, 1)
 
@@ -436,13 +440,13 @@ class TestLocalEvaluation(unittest.TestCase):
             },
         ]
 
-        # beta-feature fallbacks to decide because property type is unknown
+        # beta-feature falls back to /flags because property type is unknown
         feature_flag_match = client.get_feature_flag("beta-feature", "some-distinct-id")
 
         self.assertEqual(feature_flag_match, "alakazam")
         self.assertEqual(patch_flags.call_count, 1)
 
-        # beta-feature2 fallbacks to decide because region property not given with call
+        # beta-feature2 falls back to /flags because region property was not given with the call
         feature_flag_match = client.get_feature_flag(
             "beta-feature2", "some-distinct-id"
         )
@@ -504,7 +508,7 @@ class TestLocalEvaluation(unittest.TestCase):
             },
         ]
 
-        # beta-feature should fallback to decide because property type is unknown,
+        # beta-feature would fall back to /flags because the property type is unknown,
         # but doesn't because only_evaluate_locally is true
         feature_flag_match = client.get_feature_flag(
             "beta-feature", "some-distinct-id", only_evaluate_locally=True
@@ -520,7 +524,7 @@ class TestLocalEvaluation(unittest.TestCase):
         self.assertEqual(feature_flag_match, None)
         self.assertEqual(patch_flags.call_count, 0)
 
-        # beta-feature2 should fallback to decide because region property not given with call
+        # beta-feature2 would fall back to /flags because the region property was not given with the call,
         # but doesn't because only_evaluate_locally is true
         feature_flag_match = client.get_feature_flag(
             "beta-feature2", "some-distinct-id", only_evaluate_locally=True
@@ -562,7 +566,7 @@ class TestLocalEvaluation(unittest.TestCase):
         self.assertFalse(client.get_feature_flag("beta-feature", "some-distinct-id"))
         self.assertFalse(client.feature_enabled("beta-feature", "some-distinct-id"))
 
-        # beta-feature2 falls back to decide, and whatever decide returns is the value
+        # beta-feature2 falls back to /flags, and whatever /flags returns is the value
         self.assertFalse(client.get_feature_flag("beta-feature2", "some-distinct-id"))
         self.assertEqual(patch_flags.call_count, 1)
 
@@ -571,14 +575,14 @@ class TestLocalEvaluation(unittest.TestCase):
 
     @mock.patch("posthog.client.flags")
     @mock.patch("posthog.client.get")
-    def test_feature_flag_return_none_when_decide_errors_out(
+    def test_feature_flag_return_none_when_flags_errors_out(
         self, patch_get, patch_flags
     ):
-        patch_flags.side_effect = APIError(400, "Decide error")
+        patch_flags.side_effect = APIError(400, "Flags error")
         client = Client(FAKE_TEST_API_KEY, personal_api_key=FAKE_TEST_API_KEY)
         client.feature_flags = []
 
-        # beta-feature2 falls back to decide, which on error returns None
+        # beta-feature2 falls back to /flags, which on error returns None
         self.assertIsNone(client.get_feature_flag("beta-feature2", "some-distinct-id"))
         self.assertEqual(patch_flags.call_count, 1)
 
@@ -588,7 +592,7 @@ class TestLocalEvaluation(unittest.TestCase):
     @mock.patch("posthog.client.flags")
     def test_experience_continuity_flag_not_evaluated_locally(self, patch_flags):
         patch_flags.return_value = {
-            "featureFlags": {"beta-feature": "decide-fallback-value"}
+            "featureFlags": {"beta-feature": "flags-fallback-value"}
         }
         client = Client(FAKE_TEST_API_KEY, personal_api_key="test")
         client.feature_flags = [
@@ -609,10 +613,10 @@ class TestLocalEvaluation(unittest.TestCase):
                 "ensure_experience_continuity": True,
             }
         ]
-        # decide called always because experience_continuity is set
+        # /flags is always called when experience_continuity is set
         self.assertEqual(
             client.get_feature_flag("beta-feature", "distinct_id"),
-            "decide-fallback-value",
+            "flags-fallback-value",
         )
         self.assertEqual(patch_flags.call_count, 1)
 
@@ -625,7 +629,7 @@ class TestLocalEvaluation(unittest.TestCase):
                 "beta-feature2": "variant-2",
                 "disabled-feature": False,
             }
-        }  # decide should return the same flags
+        }  # /flags should return the same flags
         client = self.client
         client.feature_flags = [
             {
@@ -836,7 +840,7 @@ class TestLocalEvaluation(unittest.TestCase):
             client.get_all_flags("distinct_id"),
             {"beta-feature": True, "disabled-feature": False},
         )
-        # decide not called because this can be evaluated locally
+        # /flags is not called because this can be evaluated locally
         self.assertEqual(patch_flags.call_count, 0)
         self.assertEqual(patch_capture.call_count, 0)
 
@@ -889,7 +893,7 @@ class TestLocalEvaluation(unittest.TestCase):
             client.get_all_flags_and_payloads("distinct_id")["featureFlagPayloads"],
             {"beta-feature": "new"},
         )
-        # decide not called because this can be evaluated locally
+        # /flags is not called because this can be evaluated locally
         self.assertEqual(patch_flags.call_count, 0)
         self.assertEqual(patch_capture.call_count, 0)
 
@@ -1071,7 +1075,7 @@ class TestLocalEvaluation(unittest.TestCase):
             client.get_all_flags("distinct_id"),
             {"beta-feature": True, "disabled-feature": False},
         )
-        # decide not called because this can be evaluated locally
+        # /flags is not called because this can be evaluated locally
         self.assertEqual(patch_flags.call_count, 0)
         self.assertEqual(patch_capture.call_count, 0)
 
@@ -1111,7 +1115,7 @@ class TestLocalEvaluation(unittest.TestCase):
             client.get_all_flags("distinct_id"),
             {"beta-feature": False, "disabled-feature": True},
         )
-        # decide not called because this can be evaluated locally
+        # /flags is not called because this can be evaluated locally
         self.assertEqual(patch_flags.call_count, 0)
         self.assertEqual(patch_capture.call_count, 0)
 
@@ -1361,7 +1365,7 @@ class TestLocalEvaluation(unittest.TestCase):
             "some-distinct-id",
             person_properties={"region": "USA", "other": "thing"},
         )
-        # since 'other' is negated, we return False. Since 'nation' is not present, we can't tell whether the flag should be true or false, so go to decide
+        # since 'other' is negated, we return False. Since 'nation' is not present, we can't tell whether the flag should be true or false, so fall back to /flags
         self.assertEqual(patch_flags.call_count, 1)
         self.assertEqual(patch_get.call_count, 0)
 
@@ -2542,12 +2546,12 @@ class TestLocalEvaluation(unittest.TestCase):
 
         with self.assertLogs("posthog", level="ERROR") as logs:
             client.load_feature_flags()
-            self.assertEqual(
-                logs.output[0],
-                "ERROR:posthog:[FEATURE FLAGS] Error loading feature flags: To use feature flags, please set a valid personal_api_key. More information: https://posthog.com/docs/api/overview",
-            )
+            self.assertIn("Unauthorized", logs.output[0])
+            self.assertIn("project_api_key", logs.output[0])
+            self.assertIn("personal_api_key", logs.output[0])
         client.debug = True
-        self.assertRaises(APIError, client.load_feature_flags)
+        with self.assertRaisesRegex(APIError, "Unauthorized"):
+            client.load_feature_flags()
 
     @mock.patch("posthog.client.flags")
     @mock.patch("posthog.client.get")
@@ -2667,7 +2671,7 @@ class TestLocalEvaluation(unittest.TestCase):
             }
         ]
         self.assertTrue(client.feature_enabled("beta-feature", "distinct_id"))
-        # decide not called because this can be evaluated locally
+        # /flags is not called because this can be evaluated locally
         self.assertEqual(patch_flags.call_count, 0)
 
     @mock.patch("posthog.client.get")
@@ -2720,7 +2724,7 @@ class TestLocalEvaluation(unittest.TestCase):
         self.assertEqual(
             client.get_feature_flag("beta-feature", "distinct_id"), "variant-1"
         )
-        # decide not called because this can be evaluated locally
+        # /flags is not called because this can be evaluated locally
         self.assertEqual(patch_flags.call_count, 0)
 
     @mock.patch("posthog.client.Poller")
@@ -2732,7 +2736,7 @@ class TestLocalEvaluation(unittest.TestCase):
         patch_flags.return_value = {"featureFlags": {}}
         self.assertFalse(client.feature_enabled("doesnt-exist", "distinct_id"))
 
-        patch_flags.side_effect = APIError(401, "decide error")
+        patch_flags.side_effect = APIError(401, "flags error")
         self.assertIsNone(client.feature_enabled("doesnt-exist", "distinct_id"))
 
     @mock.patch("posthog.client.Poller")
@@ -2817,7 +2821,7 @@ class TestLocalEvaluation(unittest.TestCase):
         self.assertEqual(
             client.get_feature_flag("beta-feature", "example_id"), "first-variant"
         )
-        # decide not called because this can be evaluated locally
+        # /flags is not called because this can be evaluated locally
         self.assertEqual(patch_flags.call_count, 0)
 
     @mock.patch("posthog.client.flags")
@@ -2898,7 +2902,7 @@ class TestLocalEvaluation(unittest.TestCase):
             ),
             "second-variant",
         )
-        # decide not called because this can be evaluated locally
+        # /flags is not called because this can be evaluated locally
         self.assertEqual(patch_flags.call_count, 0)
 
     @mock.patch("posthog.client.flags")
@@ -2961,7 +2965,7 @@ class TestLocalEvaluation(unittest.TestCase):
         self.assertEqual(
             client.get_feature_flag("beta-feature", "example_id"), "second-variant"
         )
-        # decide not called because this can be evaluated locally
+        # /flags is not called because this can be evaluated locally
         self.assertEqual(patch_flags.call_count, 0)
 
     @mock.patch("posthog.client.flags")
@@ -3706,6 +3710,145 @@ class TestLocalEvaluation(unittest.TestCase):
         self.assertTrue(result)
         self.assertEqual(patch_flags.call_count, 0)
 
+    MIXED_FLAG = {
+        "id": 1,
+        "key": "mixed-flag",
+        "active": True,
+        "filters": {
+            "aggregation_group_type_index": None,
+            "groups": [
+                {
+                    "aggregation_group_type_index": 0,
+                    "properties": [
+                        {
+                            "key": "plan",
+                            "value": "enterprise",
+                            "operator": "exact",
+                            "type": "group",
+                            "group_type_index": 0,
+                        }
+                    ],
+                    "rollout_percentage": 100,
+                },
+                {
+                    "aggregation_group_type_index": None,
+                    "properties": [
+                        {
+                            "key": "email",
+                            "value": "test@example.com",
+                            "operator": "exact",
+                            "type": "person",
+                        }
+                    ],
+                    "rollout_percentage": 100,
+                },
+            ],
+        },
+    }
+
+    @parameterized.expand(
+        [
+            (
+                "person_condition_matches",
+                {"person_properties": {"email": "test@example.com"}},
+                True,
+            ),
+            (
+                "group_condition_matches",
+                {
+                    "groups": {"company": "acme"},
+                    "group_properties": {"company": {"plan": "enterprise"}},
+                },
+                True,
+            ),
+            (
+                "no_match",
+                {
+                    "person_properties": {"email": "wrong@example.com"},
+                    "groups": {"company": "acme"},
+                    "group_properties": {"company": {"plan": "free"}},
+                },
+                False,
+            ),
+        ]
+    )
+    @mock.patch("posthog.client.flags")
+    def test_mixed_targeting(self, _name, call_kwargs, expected, patch_flags):
+        client = Client(FAKE_TEST_API_KEY, personal_api_key=FAKE_TEST_API_KEY)
+        client.feature_flags = [self.MIXED_FLAG]
+        client.group_type_mapping = {"0": "company"}
+
+        result = client.get_feature_flag("mixed-flag", "user-123", **call_kwargs)
+        self.assertEqual(bool(result), expected)
+        self.assertEqual(patch_flags.call_count, 0)
+
+    @mock.patch("posthog.client.flags")
+    def test_mixed_targeting_only_group_conditions_no_groups_passed(self, patch_flags):
+        client = Client(FAKE_TEST_API_KEY, personal_api_key=FAKE_TEST_API_KEY)
+        client.feature_flags = [
+            {
+                "id": 1,
+                "key": "mixed-flag",
+                "active": True,
+                "filters": {
+                    "aggregation_group_type_index": None,
+                    "groups": [
+                        {
+                            "aggregation_group_type_index": 0,
+                            "properties": [],
+                            "rollout_percentage": 100,
+                        },
+                    ],
+                },
+            }
+        ]
+        client.group_type_mapping = {"0": "company"}
+
+        # No groups passed, no person condition — all conditions skip, returns False
+        result = client.get_feature_flag(
+            "mixed-flag",
+            "user-123",
+        )
+        self.assertFalse(result)
+        self.assertEqual(patch_flags.call_count, 0)
+
+    @mock.patch("posthog.client.flags")
+    def test_mixed_targeting_rollout_uses_correct_bucketing(self, patch_flags):
+        client = Client(FAKE_TEST_API_KEY, personal_api_key=FAKE_TEST_API_KEY)
+        client.feature_flags = [
+            {
+                "id": 1,
+                "key": "mixed-flag",
+                "active": True,
+                "filters": {
+                    "aggregation_group_type_index": None,
+                    "groups": [
+                        {
+                            "aggregation_group_type_index": 0,
+                            "properties": [],
+                            "rollout_percentage": 100,
+                        },
+                        {
+                            "aggregation_group_type_index": None,
+                            "properties": [],
+                            "rollout_percentage": 0,
+                        },
+                    ],
+                },
+            }
+        ]
+        client.group_type_mapping = {"0": "company"}
+
+        # Group condition at 100% matches, person condition at 0% doesn't matter
+        result = client.get_feature_flag(
+            "mixed-flag",
+            "user-123",
+            groups={"company": "acme"},
+            group_properties={"company": {}},
+        )
+        self.assertTrue(result)
+        self.assertEqual(patch_flags.call_count, 0)
+
     @mock.patch("posthog.client.flags")
     def test_get_all_flags_with_device_id_bucketing(self, patch_flags):
         """
@@ -3967,12 +4110,22 @@ class TestMatchProperties(unittest.TestCase):
                 property_a,
                 {
                     "key": datetime.datetime(
-                        2022, 4, 30, 1, 2, 3, tzinfo=tz.gettz("Europe/Madrid")
+                        2022,
+                        4,
+                        30,
+                        1,
+                        2,
+                        3,
+                        tzinfo=ZoneInfo("Europe/Madrid"),
                     )
                 },
             )
         )
-        self.assertTrue(match_property(property_a, {"key": parser.parse("2022-04-30")}))
+        self.assertTrue(
+            match_property(
+                property_a, {"key": datetime.datetime.fromisoformat("2022-04-30")}
+            )
+        )
         self.assertFalse(match_property(property_a, {"key": "2022-05-30"}))
 
         # Can't be a number
@@ -3991,7 +4144,11 @@ class TestMatchProperties(unittest.TestCase):
         self.assertTrue(
             match_property(property_b, {"key": datetime.datetime(2022, 5, 30)})
         )
-        self.assertTrue(match_property(property_b, {"key": parser.parse("2022-05-30")}))
+        self.assertTrue(
+            match_property(
+                property_b, {"key": datetime.datetime.fromisoformat("2022-05-30")}
+            )
+        )
         self.assertFalse(match_property(property_b, {"key": "2022-04-30"}))
 
         # can't be invalid string
@@ -4052,12 +4209,22 @@ class TestMatchProperties(unittest.TestCase):
                 property_a,
                 {
                     "key": datetime.datetime(
-                        2022, 4, 30, 1, 2, 3, tzinfo=tz.gettz("Europe/Madrid")
+                        2022,
+                        4,
+                        30,
+                        1,
+                        2,
+                        3,
+                        tzinfo=ZoneInfo("Europe/Madrid"),
                     )
                 },
             )
         )
-        self.assertTrue(match_property(property_a, {"key": parser.parse("2022-04-30")}))
+        self.assertTrue(
+            match_property(
+                property_a, {"key": datetime.datetime.fromisoformat("2022-04-30")}
+            )
+        )
         self.assertFalse(match_property(property_a, {"key": "2022-05-30"}))
 
         # Can't be a number
@@ -4074,7 +4241,11 @@ class TestMatchProperties(unittest.TestCase):
         self.assertTrue(
             match_property(property_b, {"key": datetime.datetime(2022, 5, 30)})
         )
-        self.assertTrue(match_property(property_b, {"key": parser.parse("2022-05-30")}))
+        self.assertTrue(
+            match_property(
+                property_b, {"key": datetime.datetime.fromisoformat("2022-05-30")}
+            )
+        )
         self.assertFalse(match_property(property_b, {"key": "2022-04-30"}))
 
         # can't be invalid string
@@ -4408,6 +4579,23 @@ class TestMatchProperties(unittest.TestCase):
         )
 
 
+class TestDateParsing(unittest.TestCase):
+    @parameterized.expand(
+        [
+            ("iso_date", "2022-05-01"),
+            ("iso_datetime_Z", "2022-04-05T12:34:12Z"),
+            ("iso_datetime_utc", "2022-04-05 12:34:12 UTC"),
+            ("iso_datetime_offset", "2022-04-05 12:34:12 +01:00"),
+        ]
+    )
+    def test_parse_datetime_matches_dateutil_for_supported_formats(self, _name, value):
+        assert parse_datetime(value) == parser.parse(value)
+
+    def test_parse_datetime_year_only_matches_previous_dateutil_behavior(self):
+        with freeze_time("2020-04-03T00:00:00"):
+            assert parse_datetime("1234") == parser.parse("1234")
+
+
 class TestRelativeDateParsing(unittest.TestCase):
     def test_invalid_input(self):
         with freeze_time("2020-01-01T12:01:20.1340Z"):
@@ -4428,6 +4616,7 @@ class TestRelativeDateParsing(unittest.TestCase):
 
     def test_overflow(self):
         assert relative_date_parse_for_feature_flag_matching("1000000h") is None
+        assert relative_date_parse_for_feature_flag_matching("9999y") is None
         assert (
             relative_date_parse_for_feature_flag_matching("100000000000000000y") is None
         )
@@ -4437,27 +4626,27 @@ class TestRelativeDateParsing(unittest.TestCase):
             assert relative_date_parse_for_feature_flag_matching(
                 "1h"
             ) == datetime.datetime(
-                2020, 1, 1, 11, 1, 20, 134000, tzinfo=tz.gettz("UTC")
+                2020, 1, 1, 11, 1, 20, 134000, tzinfo=datetime.timezone.utc
             )
             assert relative_date_parse_for_feature_flag_matching(
                 "2h"
             ) == datetime.datetime(
-                2020, 1, 1, 10, 1, 20, 134000, tzinfo=tz.gettz("UTC")
+                2020, 1, 1, 10, 1, 20, 134000, tzinfo=datetime.timezone.utc
             )
             assert relative_date_parse_for_feature_flag_matching(
                 "24h"
             ) == datetime.datetime(
-                2019, 12, 31, 12, 1, 20, 134000, tzinfo=tz.gettz("UTC")
+                2019, 12, 31, 12, 1, 20, 134000, tzinfo=datetime.timezone.utc
             )
             assert relative_date_parse_for_feature_flag_matching(
                 "30h"
             ) == datetime.datetime(
-                2019, 12, 31, 6, 1, 20, 134000, tzinfo=tz.gettz("UTC")
+                2019, 12, 31, 6, 1, 20, 134000, tzinfo=datetime.timezone.utc
             )
             assert relative_date_parse_for_feature_flag_matching(
                 "48h"
             ) == datetime.datetime(
-                2019, 12, 30, 12, 1, 20, 134000, tzinfo=tz.gettz("UTC")
+                2019, 12, 30, 12, 1, 20, 134000, tzinfo=datetime.timezone.utc
             )
 
             assert relative_date_parse_for_feature_flag_matching(
@@ -4472,27 +4661,27 @@ class TestRelativeDateParsing(unittest.TestCase):
             assert relative_date_parse_for_feature_flag_matching(
                 "1d"
             ) == datetime.datetime(
-                2019, 12, 31, 12, 1, 20, 134000, tzinfo=tz.gettz("UTC")
+                2019, 12, 31, 12, 1, 20, 134000, tzinfo=datetime.timezone.utc
             )
             assert relative_date_parse_for_feature_flag_matching(
                 "2d"
             ) == datetime.datetime(
-                2019, 12, 30, 12, 1, 20, 134000, tzinfo=tz.gettz("UTC")
+                2019, 12, 30, 12, 1, 20, 134000, tzinfo=datetime.timezone.utc
             )
             assert relative_date_parse_for_feature_flag_matching(
                 "7d"
             ) == datetime.datetime(
-                2019, 12, 25, 12, 1, 20, 134000, tzinfo=tz.gettz("UTC")
+                2019, 12, 25, 12, 1, 20, 134000, tzinfo=datetime.timezone.utc
             )
             assert relative_date_parse_for_feature_flag_matching(
                 "14d"
             ) == datetime.datetime(
-                2019, 12, 18, 12, 1, 20, 134000, tzinfo=tz.gettz("UTC")
+                2019, 12, 18, 12, 1, 20, 134000, tzinfo=datetime.timezone.utc
             )
             assert relative_date_parse_for_feature_flag_matching(
                 "30d"
             ) == datetime.datetime(
-                2019, 12, 2, 12, 1, 20, 134000, tzinfo=tz.gettz("UTC")
+                2019, 12, 2, 12, 1, 20, 134000, tzinfo=datetime.timezone.utc
             )
 
             assert relative_date_parse_for_feature_flag_matching(
@@ -4504,28 +4693,28 @@ class TestRelativeDateParsing(unittest.TestCase):
             assert relative_date_parse_for_feature_flag_matching(
                 "1w"
             ) == datetime.datetime(
-                2019, 12, 25, 12, 1, 20, 134000, tzinfo=tz.gettz("UTC")
+                2019, 12, 25, 12, 1, 20, 134000, tzinfo=datetime.timezone.utc
             )
             assert relative_date_parse_for_feature_flag_matching(
                 "2w"
             ) == datetime.datetime(
-                2019, 12, 18, 12, 1, 20, 134000, tzinfo=tz.gettz("UTC")
+                2019, 12, 18, 12, 1, 20, 134000, tzinfo=datetime.timezone.utc
             )
             assert relative_date_parse_for_feature_flag_matching(
                 "4w"
             ) == datetime.datetime(
-                2019, 12, 4, 12, 1, 20, 134000, tzinfo=tz.gettz("UTC")
+                2019, 12, 4, 12, 1, 20, 134000, tzinfo=datetime.timezone.utc
             )
             assert relative_date_parse_for_feature_flag_matching(
                 "8w"
             ) == datetime.datetime(
-                2019, 11, 6, 12, 1, 20, 134000, tzinfo=tz.gettz("UTC")
+                2019, 11, 6, 12, 1, 20, 134000, tzinfo=datetime.timezone.utc
             )
 
             assert relative_date_parse_for_feature_flag_matching(
                 "1m"
             ) == datetime.datetime(
-                2019, 12, 1, 12, 1, 20, 134000, tzinfo=tz.gettz("UTC")
+                2019, 12, 1, 12, 1, 20, 134000, tzinfo=datetime.timezone.utc
             )
             assert relative_date_parse_for_feature_flag_matching(
                 "4w"
@@ -4536,28 +4725,28 @@ class TestRelativeDateParsing(unittest.TestCase):
             assert relative_date_parse_for_feature_flag_matching(
                 "1m"
             ) == datetime.datetime(
-                2019, 12, 1, 12, 1, 20, 134000, tzinfo=tz.gettz("UTC")
+                2019, 12, 1, 12, 1, 20, 134000, tzinfo=datetime.timezone.utc
             )
             assert relative_date_parse_for_feature_flag_matching(
                 "2m"
             ) == datetime.datetime(
-                2019, 11, 1, 12, 1, 20, 134000, tzinfo=tz.gettz("UTC")
+                2019, 11, 1, 12, 1, 20, 134000, tzinfo=datetime.timezone.utc
             )
             assert relative_date_parse_for_feature_flag_matching(
                 "4m"
             ) == datetime.datetime(
-                2019, 9, 1, 12, 1, 20, 134000, tzinfo=tz.gettz("UTC")
+                2019, 9, 1, 12, 1, 20, 134000, tzinfo=datetime.timezone.utc
             )
             assert relative_date_parse_for_feature_flag_matching(
                 "8m"
             ) == datetime.datetime(
-                2019, 5, 1, 12, 1, 20, 134000, tzinfo=tz.gettz("UTC")
+                2019, 5, 1, 12, 1, 20, 134000, tzinfo=datetime.timezone.utc
             )
 
             assert relative_date_parse_for_feature_flag_matching(
                 "1y"
             ) == datetime.datetime(
-                2019, 1, 1, 12, 1, 20, 134000, tzinfo=tz.gettz("UTC")
+                2019, 1, 1, 12, 1, 20, 134000, tzinfo=datetime.timezone.utc
             )
             assert relative_date_parse_for_feature_flag_matching(
                 "12m"
@@ -4566,45 +4755,60 @@ class TestRelativeDateParsing(unittest.TestCase):
         with freeze_time("2020-04-03T00:00:00"):
             assert relative_date_parse_for_feature_flag_matching(
                 "1m"
-            ) == datetime.datetime(2020, 3, 3, 0, 0, 0, tzinfo=tz.gettz("UTC"))
+            ) == datetime.datetime(2020, 3, 3, 0, 0, 0, tzinfo=datetime.timezone.utc)
             assert relative_date_parse_for_feature_flag_matching(
                 "2m"
-            ) == datetime.datetime(2020, 2, 3, 0, 0, 0, tzinfo=tz.gettz("UTC"))
+            ) == datetime.datetime(2020, 2, 3, 0, 0, 0, tzinfo=datetime.timezone.utc)
             assert relative_date_parse_for_feature_flag_matching(
                 "4m"
-            ) == datetime.datetime(2019, 12, 3, 0, 0, 0, tzinfo=tz.gettz("UTC"))
+            ) == datetime.datetime(2019, 12, 3, 0, 0, 0, tzinfo=datetime.timezone.utc)
             assert relative_date_parse_for_feature_flag_matching(
                 "8m"
-            ) == datetime.datetime(2019, 8, 3, 0, 0, 0, tzinfo=tz.gettz("UTC"))
+            ) == datetime.datetime(2019, 8, 3, 0, 0, 0, tzinfo=datetime.timezone.utc)
 
             assert relative_date_parse_for_feature_flag_matching(
                 "1y"
-            ) == datetime.datetime(2019, 4, 3, 0, 0, 0, tzinfo=tz.gettz("UTC"))
+            ) == datetime.datetime(2019, 4, 3, 0, 0, 0, tzinfo=datetime.timezone.utc)
             assert relative_date_parse_for_feature_flag_matching(
                 "12m"
             ) == relative_date_parse_for_feature_flag_matching("1y")
+
+    def test_month_parsing_clamps_to_target_month_end(self):
+        for value in ("2020-03-31T00:00:00Z", "2021-03-31T00:00:00Z"):
+            with freeze_time(value):
+                now = datetime.datetime.now(datetime.timezone.utc)
+                assert relative_date_parse_for_feature_flag_matching(
+                    "1m"
+                ) == now - relativedelta(months=1)
+
+    def test_year_parsing_clamps_to_target_month_end(self):
+        with freeze_time("2020-02-29T00:00:00Z"):
+            now = datetime.datetime.now(datetime.timezone.utc)
+            assert relative_date_parse_for_feature_flag_matching(
+                "1y"
+            ) == now - relativedelta(years=1)
 
     def test_year_parsing(self):
         with freeze_time("2020-01-01T12:01:20.1340Z"):
             assert relative_date_parse_for_feature_flag_matching(
                 "1y"
             ) == datetime.datetime(
-                2019, 1, 1, 12, 1, 20, 134000, tzinfo=tz.gettz("UTC")
+                2019, 1, 1, 12, 1, 20, 134000, tzinfo=datetime.timezone.utc
             )
             assert relative_date_parse_for_feature_flag_matching(
                 "2y"
             ) == datetime.datetime(
-                2018, 1, 1, 12, 1, 20, 134000, tzinfo=tz.gettz("UTC")
+                2018, 1, 1, 12, 1, 20, 134000, tzinfo=datetime.timezone.utc
             )
             assert relative_date_parse_for_feature_flag_matching(
                 "4y"
             ) == datetime.datetime(
-                2016, 1, 1, 12, 1, 20, 134000, tzinfo=tz.gettz("UTC")
+                2016, 1, 1, 12, 1, 20, 134000, tzinfo=datetime.timezone.utc
             )
             assert relative_date_parse_for_feature_flag_matching(
                 "8y"
             ) == datetime.datetime(
-                2012, 1, 1, 12, 1, 20, 134000, tzinfo=tz.gettz("UTC")
+                2012, 1, 1, 12, 1, 20, 134000, tzinfo=datetime.timezone.utc
             )
 
 
@@ -4612,7 +4816,7 @@ class TestCaptureCalls(unittest.TestCase):
     @mock.patch.object(Client, "capture")
     @mock.patch("posthog.client.flags")
     def test_capture_is_called(self, patch_flags, patch_capture):
-        patch_flags.return_value = {"featureFlags": {"decide-flag": "decide-value"}}
+        patch_flags.return_value = {"featureFlags": {"flags-flag": "flags-value"}}
         client = Client(FAKE_TEST_API_KEY, personal_api_key=FAKE_TEST_API_KEY)
         client.feature_flags = [
             {
@@ -4699,15 +4903,15 @@ class TestCaptureCalls(unittest.TestCase):
         self.assertEqual(patch_capture.call_count, 0)
         patch_capture.reset_mock()
 
-        # called for different flag, falls back to decide, should call capture again
+        # called for different flag, falls back to /flags, should call capture again
         self.assertEqual(
             client.get_feature_flag(
-                "decide-flag",
+                "flags-flag",
                 "some-distinct-id2",
                 person_properties={"region": "USA", "name": "Aloha"},
                 groups={"organization": "org1"},
             ),
-            "decide-value",
+            "flags-value",
         )
         self.assertEqual(patch_flags.call_count, 1)
         self.assertEqual(patch_capture.call_count, 1)
@@ -4715,10 +4919,10 @@ class TestCaptureCalls(unittest.TestCase):
             "$feature_flag_called",
             distinct_id="some-distinct-id2",
             properties={
-                "$feature_flag": "decide-flag",
-                "$feature_flag_response": "decide-value",
+                "$feature_flag": "flags-flag",
+                "$feature_flag_response": "flags-value",
                 "locally_evaluated": False,
-                "$feature/decide-flag": "decide-value",
+                "$feature/flags-flag": "flags-value",
             },
             groups={"organization": "org1"},
             disable_geoip=None,
@@ -4729,10 +4933,10 @@ class TestCaptureCalls(unittest.TestCase):
     def test_capture_is_called_with_flag_details(self, patch_flags, patch_capture):
         patch_flags.return_value = {
             "flags": {
-                "decide-flag": {
-                    "key": "decide-flag",
+                "flags-flag": {
+                    "key": "flags-flag",
                     "enabled": True,
-                    "variant": "decide-variant",
+                    "variant": "flags-variant",
                     "reason": {
                         "description": "Matched condition set 1",
                     },
@@ -4762,17 +4966,17 @@ class TestCaptureCalls(unittest.TestCase):
         client = Client(FAKE_TEST_API_KEY)
 
         self.assertEqual(
-            client.get_feature_flag("decide-flag", "some-distinct-id"), "decide-variant"
+            client.get_feature_flag("flags-flag", "some-distinct-id"), "flags-variant"
         )
         self.assertEqual(patch_capture.call_count, 1)
         patch_capture.assert_called_with(
             "$feature_flag_called",
             distinct_id="some-distinct-id",
             properties={
-                "$feature_flag": "decide-flag",
-                "$feature_flag_response": "decide-variant",
+                "$feature_flag": "flags-flag",
+                "$feature_flag_response": "flags-variant",
                 "locally_evaluated": False,
-                "$feature/decide-flag": "decide-variant",
+                "$feature/flags-flag": "flags-variant",
                 "$feature_flag_reason": "Matched condition set 1",
                 "$feature_flag_id": 23,
                 "$feature_flag_version": 42,
@@ -4790,8 +4994,8 @@ class TestCaptureCalls(unittest.TestCase):
     ):
         patch_flags.return_value = {
             "flags": {
-                "decide-flag-with-payload": {
-                    "key": "decide-flag-with-payload",
+                "flags-flag-with-payload": {
+                    "key": "flags-flag-with-payload",
                     "enabled": True,
                     "variant": None,
                     "reason": {
@@ -4812,7 +5016,7 @@ class TestCaptureCalls(unittest.TestCase):
 
         self.assertEqual(
             client.get_feature_flag_payload(
-                "decide-flag-with-payload",
+                "flags-flag-with-payload",
                 "some-distinct-id",
                 send_feature_flag_events=True,
             ),
@@ -4823,10 +5027,10 @@ class TestCaptureCalls(unittest.TestCase):
             "$feature_flag_called",
             distinct_id="some-distinct-id",
             properties={
-                "$feature_flag": "decide-flag-with-payload",
+                "$feature_flag": "flags-flag-with-payload",
                 "$feature_flag_response": True,
                 "locally_evaluated": False,
-                "$feature/decide-flag-with-payload": True,
+                "$feature/flags-flag-with-payload": True,
                 "$feature_flag_reason": "Matched condition set 1",
                 "$feature_flag_id": 23,
                 "$feature_flag_version": 42,
@@ -4839,7 +5043,7 @@ class TestCaptureCalls(unittest.TestCase):
 
     @mock.patch("posthog.client.flags")
     def test_capture_is_called_but_does_not_add_all_flags(self, patch_flags):
-        patch_flags.return_value = {"featureFlags": {"decide-flag": "decide-value"}}
+        patch_flags.return_value = {"featureFlags": {"flags-flag": "flags-value"}}
         client = Client(FAKE_TEST_API_KEY, personal_api_key=FAKE_TEST_API_KEY)
         client.feature_flags = [
             {
@@ -4985,7 +5189,7 @@ class TestCaptureCalls(unittest.TestCase):
     @mock.patch.object(Client, "capture")
     @mock.patch("posthog.client.flags")
     def test_disable_geoip_get_flag_capture_call(self, patch_flags, patch_capture):
-        patch_flags.return_value = {"featureFlags": {"decide-flag": "decide-value"}}
+        patch_flags.return_value = {"featureFlags": {"flags-flag": "flags-value"}}
         client = Client(
             FAKE_TEST_API_KEY, personal_api_key=FAKE_TEST_API_KEY, disable_geoip=True
         )
@@ -7182,10 +7386,10 @@ class TestConsistency(unittest.TestCase):
                 self.assertFalse(feature_flag_match)
 
     @mock.patch("posthog.client.flags")
-    def test_feature_flag_case_sensitive(self, mock_decide):
-        mock_decide.return_value = {
+    def test_feature_flag_case_sensitive(self, mock_flags):
+        mock_flags.return_value = {
             "featureFlags": {}
-        }  # Ensure decide returns empty flags
+        }  # Ensure /flags returns empty flags
 
         client = Client(
             project_api_key=FAKE_TEST_API_KEY, personal_api_key=FAKE_TEST_API_KEY
@@ -7207,8 +7411,8 @@ class TestConsistency(unittest.TestCase):
         self.assertFalse(client.feature_enabled("BETA-FEATURE", "user1"))
 
     @mock.patch("posthog.client.flags")
-    def test_feature_flag_payload_case_sensitive(self, mock_decide):
-        mock_decide.return_value = {
+    def test_feature_flag_payload_case_sensitive(self, mock_flags):
+        mock_flags.return_value = {
             "featureFlags": {"Beta-Feature": True},
             "featureFlagPayloads": {"Beta-Feature": {"some": "value"}},
         }
@@ -7238,8 +7442,8 @@ class TestConsistency(unittest.TestCase):
         self.assertIsNone(client.get_feature_flag_payload("BETA-FEATURE", "user1"))
 
     @mock.patch("posthog.client.flags")
-    def test_feature_flag_case_sensitive_consistency(self, mock_decide):
-        mock_decide.return_value = {
+    def test_feature_flag_case_sensitive_consistency(self, mock_flags):
+        mock_flags.return_value = {
             "featureFlags": {"Beta-Feature": True},
             "featureFlagPayloads": {"Beta-Feature": {"some": "value"}},
         }
